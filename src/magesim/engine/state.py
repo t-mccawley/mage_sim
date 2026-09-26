@@ -63,10 +63,32 @@ class Enemy:
         return self.health > 0.0
 
 
-class SpellHandle:
-    """A spell as seen by a rotation: static data plus live cooldown and cost."""
+class UnavailableSpellError(Exception):
+    """A rotation used a spell the character cannot have; the candidate is invalid."""
 
-    __slots__ = ("_caster", "base_cost", "cast_time", "cooldown", "definition", "rank", "ready_at")
+    def __init__(self, spell: str, reason: str) -> None:
+        super().__init__(f"rotation uses {spell}, which {reason}")
+        self.spell = spell
+        self.reason = reason
+
+
+class SpellHandle:
+    """A spell as seen by a rotation: static data plus live cooldown and cost.
+
+    For a spell the character cannot have, only identity and `known` may be read;
+    anything else raises UnavailableSpellError.
+    """
+
+    __slots__ = (
+        "_base_cost",
+        "_cast_time",
+        "_caster",
+        "_cooldown",
+        "_rank",
+        "definition",
+        "ready_at",
+        "unavailable_reason",
+    )
 
     def __init__(
         self,
@@ -74,20 +96,45 @@ class SpellHandle:
         rank: SpellRank | None,
         caster: CasterState,
         *,
+        unavailable_reason: str | None,
         cast_time: float,
         cooldown: float,
         base_cost: float,
     ) -> None:
         self.definition = definition
-        self.rank = rank
-        self.cast_time = cast_time
-        self.cooldown = cooldown
-        self.base_cost = base_cost
+        self.unavailable_reason = unavailable_reason
         self.ready_at = 0.0
+        self._rank = rank
+        self._cast_time = cast_time
+        self._cooldown = cooldown
+        self._base_cost = base_cost
         self._caster = caster
 
     def __repr__(self) -> str:
-        return f"SpellHandle({self.name}, rank={self.rank.rank if self.rank else None})"
+        rank = self._rank.rank if self._rank else None
+        return f"SpellHandle({self.name}, rank={rank})"
+
+    def _require(self) -> SpellRank:
+        if self._rank is None:
+            raise UnavailableSpellError(self.name, self.unavailable_reason or "is not known")
+        return self._rank
+
+    @property
+    def rank(self) -> SpellRank:
+        """Rank that will be cast."""
+        return self._require()
+
+    @property
+    def cast_time(self) -> float:
+        """Cast (or channel) time after talents."""
+        self._require()
+        return self._cast_time
+
+    @property
+    def cooldown(self) -> float:
+        """Cooldown after talents."""
+        self._require()
+        return self._cooldown
 
     @property
     def spell_id(self) -> SpellId:
@@ -106,12 +153,13 @@ class SpellHandle:
 
     @property
     def known(self) -> bool:
-        """True if learned (level and talents allow it)."""
-        return self.rank is not None
+        """True if learned (level and talents allow it). Safe to read for any spell."""
+        return self._rank is not None
 
     @property
     def cooldown_remaining(self) -> float:
         """Seconds until off cooldown."""
+        self._require()
         return max(self.ready_at - self._caster.time, 0.0)
 
     @property
@@ -127,11 +175,10 @@ class SpellHandle:
     @property
     def mana_cost(self) -> float:
         """Current cost including clearcasting and Arcane Blast stacks."""
-        if self.rank is None:
-            return 0.0
+        self._require()
         if self._caster.clearcasting:
             return 0.0
-        cost = self.base_cost
+        cost = self._base_cost
         if self.spell_id is SpellId.ARCANE_BLAST:
             cost *= 1.0 + ARCANE_BLAST_COST_PER_STACK * self._caster.active_arcane_blast_stacks
         return cost
@@ -143,5 +190,5 @@ class SpellHandle:
 
     @property
     def ready(self) -> bool:
-        """True if known, off cooldown, and affordable."""
-        return self.known and not self.on_cooldown and self.affordable
+        """True if off cooldown and affordable."""
+        return not self.on_cooldown and self.affordable

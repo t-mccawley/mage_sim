@@ -32,7 +32,6 @@ class SpellbookRow:
     dot_duration: float
     dot_ticks: int
     wowhead_id: int | None
-    low_level_penalty: float
     direct_base: float
     direct_scale: float
     direct_coefficient: float
@@ -55,7 +54,7 @@ def spellbook_rows(catalog: SpellCatalog) -> list[SpellbookRow]:
                     spell=definition.name,
                     rank=rank.rank,
                     level=rank.level,
-                    school=m.school.value,
+                    school="+".join(s.value for s in m.schools),
                     cast_kind=m.cast_kind.value,
                     targeting=m.targeting.value,
                     min_damage=rank.min_damage,
@@ -70,7 +69,6 @@ def spellbook_rows(catalog: SpellCatalog) -> list[SpellbookRow]:
                     dot_duration=rank.dot.duration if rank.dot else 0.0,
                     dot_ticks=rank.dot.ticks if rank.dot else 0,
                     wowhead_id=rank.wowhead_id,
-                    low_level_penalty=round(c.low_level_penalty, 4),
                     direct_base=round(c.direct_base, 4),
                     direct_scale=round(m.direct_scale, 4),
                     direct_coefficient=round(c.direct, 4),

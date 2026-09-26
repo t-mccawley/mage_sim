@@ -116,6 +116,34 @@ SPELL_MECHANICS: Final[dict[SpellId, SpellMechanics]] = {
             scale_note="new in Forever; standard formula",
             granted_by_talent="Arcane Blast",
         ),
+        SpellMechanics(
+            spell_id=SpellId.FROSTFIRE_BOLT,
+            school=School.FIRE,
+            extra_schools=(School.FROST,),
+            cast_kind=CastKind.CAST,
+            targeting=Targeting.SINGLE,
+            direct_scale=CONTROL_EFFECT_SCALE,
+            scale_note="new in Forever; standard formula, slow effect",
+            chills=True,
+        ),
+        SpellMechanics(
+            spell_id=SpellId.BLAST_WAVE,
+            school=School.FIRE,
+            cast_kind=CastKind.INSTANT,
+            targeting=Targeting.AOE,
+            direct_scale=0.301,
+            scale_note="wowsims",
+            granted_by_talent="Blast Wave",
+        ),
+        SpellMechanics(
+            spell_id=SpellId.CONE_OF_COLD,
+            school=School.FROST,
+            cast_kind=CastKind.INSTANT,
+            targeting=Targeting.AOE,
+            direct_scale=AOE_SCALE * CONTROL_EFFECT_SCALE,
+            scale_note="AoE, slow effect",
+            chills=True,
+        ),
     )
 }
 

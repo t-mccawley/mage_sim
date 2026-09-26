@@ -6,7 +6,7 @@ import webbrowser
 from pathlib import Path
 
 from magesim.config_loader import Configs, load_configs, load_spell_catalog
-from magesim.experiment.candidates import Candidate, build_candidates
+from magesim.experiment.candidates import Candidate, InvalidCandidate, plan_candidates
 from magesim.experiment.runner import run_all
 from magesim.experiment.stats import CandidateSummary
 from magesim.report.html import write_report
@@ -50,15 +50,17 @@ def _export_spellbook(configs_dir: Path, out: str) -> int:
     return 0
 
 
-def _print_skipped(configs: Configs, candidates: list[Candidate]) -> None:
-    used = {c.talents.url for c in candidates}
-    levels = {c.level for c in configs.characters}
-    for build in configs.talents:
-        if build.url not in used:
-            print(
-                f"  skipped talents {build.display_name}: requires level "
-                f"{build.required_level}, characters are {sorted(levels)}"
-            )
+def _print_invalid(invalid: list[InvalidCandidate]) -> None:
+    for c in invalid:
+        print(
+            f"  invalid: {c.rotation.display_name} | {c.talents.display_name} | "
+            f"{c.encounter.display_name} | {c.character.display_name}"
+        )
+        for reason in c.reasons:
+            print(f"      - {reason}")
+
+
+def _print_unpaired(configs: Configs) -> None:
     types = {e.encounter_type for e in configs.encounters}
     for rotation in configs.rotations:
         if rotation.encounter_type not in types:
@@ -69,7 +71,7 @@ def _print_skipped(configs: Configs, candidates: list[Candidate]) -> None:
 def _progress(candidate: Candidate, summary: CandidateSummary) -> None:
     d = summary.total_dps
     print(
-        f"  {candidate.label:>4} {d.median:8.1f} DpS  [{d.low:.1f} - {d.high:.1f}]  "
+        f"  {candidate.label:>4} {d!s:>22} DpS  "
         f"{candidate.rotation.display_name} | {candidate.talents.display_name} | "
         f"{candidate.encounter.display_name}"
     )
@@ -83,16 +85,27 @@ def main(argv: list[str] | None = None) -> int:
     if args.refresh_talents:
         print(f"Talent data refreshed: {refresh_snapshot()}")
     configs = load_configs(args.configs)
-    candidates = build_candidates(
-        configs.characters, configs.encounters, configs.rotations, configs.talents
+    plan = plan_candidates(
+        configs.characters,
+        configs.encounters,
+        configs.rotations,
+        configs.talents,
+        configs.catalog,
+        configs.meta,
     )
-    print(f"{len(candidates)} candidates, {configs.meta.iterations} iterations each")
-    _print_skipped(configs, candidates)
-    if not candidates:
-        print("Nothing to simulate: check encounter types and talent levels.", file=sys.stderr)
+    print(
+        f"{len(plan.valid)} valid candidates ({len(plan.invalid)} invalid), "
+        f"{configs.meta.iterations} iterations each"
+    )
+    _print_unpaired(configs)
+    _print_invalid(plan.invalid)
+    if not plan.valid:
+        print("Nothing to simulate: every combination is invalid.", file=sys.stderr)
         return 1
-    summaries = run_all(candidates, configs.catalog, configs.meta, on_done=_progress)
-    path = write_report(summaries, configs.meta)
+    results = run_all(plan.valid, configs.catalog, configs.meta, on_done=_progress)
+    _print_invalid(results.invalid)
+    invalid = plan.invalid + results.invalid
+    path = write_report(results.summaries, invalid, configs.meta)
     print(f"Report: {path.resolve()}")
     if configs.meta.open_report and not args.no_open:
         webbrowser.open(path.resolve().as_uri())

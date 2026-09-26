@@ -2,14 +2,24 @@
 
 import random
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from magesim.engine.simulator import Simulation
-from magesim.experiment.candidates import Candidate
+from magesim.engine.state import UnavailableSpellError
+from magesim.experiment.candidates import Candidate, InvalidCandidate
 from magesim.experiment.stats import CandidateSummary, summarize
 from magesim.model.meta import MetaConfig
 from magesim.spells.definitions import SpellCatalog
 
 type ProgressCallback = Callable[[Candidate, CandidateSummary], None]
+
+
+@dataclass(frozen=True, slots=True)
+class RunResults:
+    """Summaries of completed candidates, plus any found invalid mid-run."""
+
+    summaries: list[CandidateSummary]
+    invalid: list[InvalidCandidate]
 
 
 def run_candidate(
@@ -27,7 +37,7 @@ def run_candidate(
     )
     rng = random.Random(f"{meta.seed}:{candidate.number}")
     results = [sim.run(rng) for _ in range(meta.iterations)]
-    return summarize(candidate, results, meta.tick_seconds, sim.modifiers.unimplemented)
+    return summarize(candidate, results, meta, sim.modifiers.unimplemented)
 
 
 def run_all(
@@ -35,12 +45,17 @@ def run_all(
     catalog: SpellCatalog,
     meta: MetaConfig,
     on_done: ProgressCallback | None = None,
-) -> list[CandidateSummary]:
+) -> RunResults:
     """Simulate every candidate in order."""
     summaries: list[CandidateSummary] = []
+    invalid: list[InvalidCandidate] = []
     for candidate in candidates:
-        summary = run_candidate(candidate, catalog, meta)
+        try:
+            summary = run_candidate(candidate, catalog, meta)
+        except UnavailableSpellError as error:
+            invalid.append(InvalidCandidate.of(candidate, str(error)))
+            continue
         summaries.append(summary)
         if on_done is not None:
             on_done(candidate, summary)
-    return summaries
+    return RunResults(summaries, invalid)

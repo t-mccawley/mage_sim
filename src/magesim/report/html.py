@@ -1,6 +1,7 @@
 """Self-contained HTML report."""
 
 import html
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -9,7 +10,8 @@ from typing import Final
 import numpy as np
 import plotly.graph_objects as go
 
-from magesim.experiment.stats import CandidateSummary, Percentiles
+from magesim.experiment.candidates import Candidate, InvalidCandidate
+from magesim.experiment.stats import CandidateSummary, ConfidenceInterval
 from magesim.model.meta import MetaConfig
 
 # Reference categorical palette, fixed order.
@@ -24,6 +26,9 @@ SERIES_COLORS: Final = (
     "#e34948",
 )
 BAR_COLOR: Final = SERIES_COLORS[0]
+TOTAL_COLOR: Final = SERIES_COLORS[0]
+PEAK_COLOR: Final = SERIES_COLORS[7]
+DPS_CHART_ID: Final = "dps-chart"
 OVERFLOW_COLOR: Final = "#a3a29c"
 SURFACE: Final = "#fcfcfb"
 TEXT_PRIMARY: Final = "#0b0b0b"
@@ -46,48 +51,101 @@ def _layout(fig: go.Figure, title: str, height: int) -> None:
     fig.update_yaxes(gridcolor=GRID, zeroline=False, linecolor=GRID)
 
 
-def _bar_chart(summaries: list[CandidateSummary], title: str, attr: str) -> go.Figure:
-    """Horizontal median bars with 15th-85th percentile whiskers, best on top."""
-    ranked = sorted(summaries, key=lambda s: _pct(s, attr).median)
-    stats = [_pct(s, attr) for s in ranked]
-    labels = [s.candidate.label for s in ranked]
-    fig = go.Figure(
-        go.Bar(
-            x=[p.median for p in stats],
-            y=labels,
-            orientation="h",
-            marker={"color": BAR_COLOR, "cornerradius": 4},
-            error_x={
-                "type": "data",
-                "symmetric": False,
-                "color": TEXT_SECONDARY,
-                "thickness": 1.5,
-                "array": [p.high - p.median for p in stats],
-                "arrayminus": [p.median - p.low for p in stats],
-            },
-            text=[f"{p.median:.1f}" for p in stats],
-            textposition="inside",
-            insidetextanchor="start",
-            textfont={"color": "white"},
-            customdata=[
-                [p.low, p.high, s.candidate.rotation.display_name]
-                for p, s in zip(stats, ranked, strict=True)
-            ],
-            hovertemplate=(
-                "%{y} · %{customdata[2]}<br>median %{x:.1f}<br>"
-                "p15 %{customdata[0]:.1f} · p85 %{customdata[1]:.1f}<extra></extra>"
-            ),
-        )
+def _character_text(c: Candidate | InvalidCandidate) -> str:
+    return f"{_esc(c.character.display_name)} (L{c.character.level})"
+
+
+def _rotation_html(c: Candidate | InvalidCandidate) -> str:
+    return (
+        f"<b>{_esc(c.rotation.display_name)}</b><br>"
+        f"<span class='muted'>{_esc(c.rotation.description)}</span>"
     )
-    _layout(fig, title, height=max(220, 44 * len(summaries) + 100))
-    fig.update_layout(bargap=0.35)
+
+
+def _talents_html(c: Candidate | InvalidCandidate) -> str:
+    return f"<a href='{_esc(c.talents.url)}'>{_esc(c.talents.display_name)}</a>"
+
+
+def _hover_html(s: CandidateSummary) -> str:
+    """Tooltip summary; field formats match the Candidate Legend."""
+    c = s.candidate
+    return "<br>".join(
+        [
+            f"<b>Candidate {c.label}</b>",
+            f"Total DpS: {s.total_dps}",
+            f"Peak DpS: {s.peak_dps}",
+            f"Character: {_character_text(c)}",
+            f"Talents: {_talents_html(c)}",
+            f"Rotation: {_esc(c.rotation.display_name)} - {_esc(c.rotation.description)}",
+            f"Encounter: {_esc(c.encounter.display_name)}",
+        ]
+    )
+
+
+def _dps_bar(
+    ranked: list[CandidateSummary],
+    name: str,
+    color: str,
+    get: Callable[[CandidateSummary], ConfidenceInterval],
+) -> go.Bar:
+    stats = [get(s) for s in ranked]
+    return go.Bar(
+        name=name,
+        x=[ci.median for ci in stats],
+        y=[s.candidate.label for s in ranked],
+        orientation="h",
+        marker={"color": color, "cornerradius": 4},
+        error_x={
+            "type": "data",
+            "symmetric": False,
+            "color": TEXT_SECONDARY,
+            "thickness": 1.5,
+            "array": [ci.high - ci.median for ci in stats],
+            "arrayminus": [ci.median - ci.low for ci in stats],
+        },
+        text=[f"{ci.median:.1f}" for ci in stats],
+        textposition="inside",
+        insidetextanchor="start",
+        textfont={"color": "white"},
+        customdata=[[_hover_html(s), s.candidate.talents.url] for s in ranked],
+        hovertemplate="%{customdata[0]}<extra></extra>",
+    )
+
+
+def _dps_chart(summaries: list[CandidateSummary], confidence: float) -> go.Figure:
+    """Total (blue) and peak (red) median DpS per candidate with CI whiskers.
+
+    Sorted by total DpS, best on top. Clicking a bar opens its talent calculator.
+    """
+    ranked = sorted(summaries, key=lambda s: s.total_dps.median, reverse=True)
+    # Horizontal groups draw the first trace lowest, so Peak goes first to put Total on top.
+    fig = go.Figure(
+        [
+            _dps_bar(ranked, "Peak DpS", PEAK_COLOR, lambda s: s.peak_dps),
+            _dps_bar(ranked, "Total DpS", TOTAL_COLOR, lambda s: s.total_dps),
+        ]
+    )
+    title = f"Total and peak DpS (median, whiskers {confidence:.0%} CI)"
+    _layout(fig, title, height=max(260, 64 * len(summaries) + 140))
+    fig.update_layout(
+        barmode="group",
+        bargap=0.3,
+        bargroupgap=0.08,
+        legend={
+            "orientation": "h",
+            "x": 1,
+            "xanchor": "right",
+            "y": 1.02,
+            "yanchor": "bottom",
+            "traceorder": "reversed",
+        },
+    )
     fig.update_xaxes(title="DpS", rangemode="tozero")
+    fig.update_yaxes(
+        categoryorder="array",
+        categoryarray=[s.candidate.label for s in reversed(ranked)],
+    )
     return fig
-
-
-def _pct(summary: CandidateSummary, attr: str) -> Percentiles:
-    value: Percentiles = getattr(summary, attr)
-    return value
 
 
 def _series_chart(summaries: list[CandidateSummary], warmup_seconds: float) -> go.Figure:
@@ -135,21 +193,25 @@ class _Column:
     facet: bool = False
 
 
-_LEGEND_COLUMNS: Final = (
-    _Column("#", numeric=True),
-    _Column("Total DpS", numeric=True),
-    _Column("Total p15-p85"),
-    _Column("Peak DpS", numeric=True),
-    _Column("Encounter", facet=True),
-    _Column("Rotation", facet=True),
-    _Column("Talents", facet=True),
-    _Column("Character", facet=True),
-    _Column("Kills", numeric=True),
-    _Column("Drinking (s)", numeric=True),
-    _Column("Blocked (s)", numeric=True),
-    _Column("Damage share"),
-    _Column("Notes"),
-)
+def _legend_columns(confidence: float) -> tuple[_Column, ...]:
+    ci = f"{confidence:.0%} CI"
+    return (
+        _Column("#", numeric=True),
+        _Column("Total DpS", numeric=True),
+        _Column(f"Total {ci}", numeric=True),
+        _Column("Peak DpS", numeric=True),
+        _Column(f"Peak {ci}", numeric=True),
+        _Column("Encounter", facet=True),
+        _Column("Rotation", facet=True),
+        _Column("Talents", facet=True),
+        _Column("Character", facet=True),
+        _Column("Kills", numeric=True),
+        _Column("Drinking (s)", numeric=True),
+        _Column("Blocked (s)", numeric=True),
+        _Column("Damage share"),
+        _Column("Casts per run"),
+        _Column("Notes"),
+    )
 
 
 def _cell(text: str, sort: float | str | None = None, css: str = "") -> str:
@@ -168,37 +230,57 @@ def _legend_row(s: CandidateSummary) -> str:
         top = list(s.blocked_seconds_per_iteration.items())[:3]
         notes.append("Blocked: " + ", ".join(f"{k} ({v:.0f} s)" for k, v in top))
     share = ", ".join(f"{k} {v:.0%}" for k, v in list(s.damage_share.items())[:4])
+    casts = "<br>".join(f"{_esc(k)}: {v:.1f}" for k, v in s.casts_per_iteration.items())
     total, peak = s.total_dps, s.peak_dps
     blocked = sum(s.blocked_seconds_per_iteration.values())
-    rotation = (
-        f"<b>{_esc(c.rotation.display_name)}</b><br>"
-        f"<span class='muted'>{_esc(c.rotation.description)}</span>"
-    )
-    talents = f"<a href='{_esc(c.talents.url)}'>{_esc(c.talents.display_name)}</a>"
     cells = (
         _cell(c.label, c.number, "num"),
         _cell(f"{total.median:.1f}", total.median, "num"),
-        _cell(f"{total.low:.1f} - {total.high:.1f}", total.median, "num"),
+        _cell(f"{total.low:.1f} - {total.high:.1f}", total.low, "num"),
         _cell(f"{peak.median:.1f}", peak.median, "num"),
+        _cell(f"{peak.low:.1f} - {peak.high:.1f}", peak.low, "num"),
         _cell(_esc(c.encounter.display_name), c.encounter.display_name),
-        _cell(rotation, c.rotation.display_name),
-        _cell(talents, c.talents.display_name),
-        _cell(f"{_esc(c.character.display_name)} (L{c.character.level})", c.character.display_name),
+        _cell(_rotation_html(c), c.rotation.display_name),
+        _cell(_talents_html(c), c.talents.display_name),
+        _cell(_character_text(c), c.character.display_name),
         _cell(f"{s.mean_kills:.1f}", s.mean_kills, "num"),
         _cell(f"{s.mean_drinking_time:.0f}", s.mean_drinking_time, "num"),
         _cell(f"{blocked:.0f}", blocked, "num"),
         _cell(_esc(share)),
+        _cell(casts, css="nowrap"),
         _cell(_esc("; ".join(notes)), css="muted"),
     )
     return f"<tr>{''.join(cells)}</tr>"
 
 
-def _legend_section(summaries: list[CandidateSummary]) -> str:
+def _invalid_section(invalid: list[InvalidCandidate]) -> str:
+    """Combinations rejected as impossible in game."""
+    if not invalid:
+        return ""
+    rows = "".join(
+        "<tr>"
+        f"<td>{_rotation_html(c)}</td><td>{_talents_html(c)}</td>"
+        f"<td>{_esc(c.encounter.display_name)}</td><td>{_character_text(c)}</td>"
+        f"<td>{'<br>'.join(_esc(r) for r in c.reasons)}</td>"
+        "</tr>"
+        for c in invalid
+    )
+    return f"""
+<div class="card">
+<h2>Invalid Candidates ({len(invalid)})</h2>
+<p class="muted note">Not simulated: these combinations are impossible in game.</p>
+<div class="scroll"><table class="plain"><thead><tr><th>Rotation</th><th>Talents</th>
+<th>Encounter</th><th>Character</th><th>Reason</th></tr></thead>
+<tbody>{rows}</tbody></table></div>
+</div>"""
+
+
+def _legend_section(summaries: list[CandidateSummary], confidence: float) -> str:
     """Titled, searchable, sortable candidate table (best total DpS first)."""
     headers = "".join(
         f"<th data-col='{i}' data-numeric='{int(col.numeric)}' data-facet='{int(col.facet)}' "
         f"aria-sort='none' tabindex='0'>{_esc(col.title)}</th>"
-        for i, col in enumerate(_LEGEND_COLUMNS)
+        for i, col in enumerate(_legend_columns(confidence))
     )
     rows = "".join(
         _legend_row(s) for s in sorted(summaries, key=lambda s: s.total_dps.median, reverse=True)
@@ -218,6 +300,13 @@ def _legend_section(summaries: list[CandidateSummary]) -> str:
 def _esc(text: str) -> str:
     return html.escape(text, quote=True)
 
+
+# Clicking a DpS bar opens that candidate's talent calculator.
+_CLICK_JS: Final = f"""
+document.getElementById("{DPS_CHART_ID}").on("plotly_click", e => {{
+  window.open(e.points[0].customdata[1], "_blank", "noopener");
+}});
+"""
 
 # Sorting (click a header), text search, and per-column filter dropdowns.
 _LEGEND_JS: Final = """
@@ -303,32 +392,39 @@ th[aria-sort="descending"]::after {{ content:" \\25BC"; }}
 tbody tr:hover {{ background:#f3f2ee; }}
 td.num {{ font-variant-numeric:tabular-nums; white-space:nowrap; }}
 a {{ color:{BAR_COLOR}; white-space:nowrap; }}
+td.nowrap {{ white-space:nowrap; }}
+.note {{ margin:0 8px 12px; }}
+table.plain th {{ cursor:default; position:static; }}
 """
 
 
-def render_report(summaries: list[CandidateSummary], meta: MetaConfig) -> str:
+def render_report(
+    summaries: list[CandidateSummary], invalid: list[InvalidCandidate], meta: MetaConfig
+) -> str:
     """Build the report HTML."""
     figs = [
-        _bar_chart(summaries, "Total DpS (median, whiskers p15-p85)", "total_dps"),
-        _bar_chart(summaries, "Peak DpS (median, whiskers p15-p85)", "peak_dps"),
-        _series_chart(summaries, meta.peak_warmup_seconds),
+        (_dps_chart(summaries, meta.confidence_level), DPS_CHART_ID),
+        (_series_chart(summaries, meta.peak_warmup_seconds), None),
     ]
     divs = [
-        f.to_html(
+        fig.to_html(
             full_html=False,
             include_plotlyjs="cdn" if i == 0 else False,
+            div_id=div_id,
             config={"displaylogo": False, "responsive": True},
         )
-        for i, f in enumerate(figs)
+        for i, (fig, div_id) in enumerate(figs)
     ]
     subtitle = " · ".join(
         [
             datetime.now().strftime("%Y-%m-%d %H:%M"),
-            f"{len(summaries)} candidates",
+            f"{len(summaries)} candidates ({len(invalid)} invalid)",
             f"{meta.iterations} iterations each",
             f"seed {meta.seed}",
             f"tick {meta.tick_seconds}s",
             f"peak DpS ignores the first {meta.peak_warmup_seconds:g}s",
+            f"CI = {meta.confidence_level:.0%} bootstrap CI of the median "
+            f"({meta.bootstrap_samples} resamples)",
         ]
     )
     return f"""<!doctype html>
@@ -340,14 +436,16 @@ def render_report(summaries: list[CandidateSummary], meta: MetaConfig) -> str:
 <div class="muted">{subtitle}</div>
 <div class="card">{divs[0]}</div>
 <div class="card">{divs[1]}</div>
-<div class="card">{divs[2]}</div>
-<div class="card">{_legend_section(summaries)}</div>
-</main><script>{_LEGEND_JS}</script></body></html>"""
+<div class="card">{_legend_section(summaries, meta.confidence_level)}</div>
+{_invalid_section(invalid)}
+</main><script>{_LEGEND_JS}{_CLICK_JS}</script></body></html>"""
 
 
-def write_report(summaries: list[CandidateSummary], meta: MetaConfig) -> Path:
+def write_report(
+    summaries: list[CandidateSummary], invalid: list[InvalidCandidate], meta: MetaConfig
+) -> Path:
     """Write the report to `meta.output_dir` and return its path."""
     meta.output_dir.mkdir(parents=True, exist_ok=True)
     path = meta.output_dir / f"magesim_{datetime.now():%Y%m%d_%H%M%S}.html"
-    path.write_text(render_report(summaries, meta), encoding="utf-8")
+    path.write_text(render_report(summaries, invalid, meta), encoding="utf-8")
     return path

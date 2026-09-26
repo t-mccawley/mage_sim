@@ -42,9 +42,5 @@ MP5_INTERVAL_SECONDS: Final = 5.0
 INTELLECT_MANA_THRESHOLD: Final = 20
 MANA_PER_INTELLECT: Final = 15
 
-# Spells learned below level 20 lose power: 3.75% per level under 20.
-LOW_LEVEL_PENALTY_LEVEL: Final = 20
-LOW_LEVEL_PENALTY_PER_LEVEL: Final = 0.0375
-
 # Frozen targets take extra Ice Lance damage.
 ICE_LANCE_FROZEN_MULTIPLIER: Final = 4.0

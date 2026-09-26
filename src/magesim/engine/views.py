@@ -81,6 +81,21 @@ class SpellBook:
         """Arcane Blast (talent)."""
         return self._handles[SpellId.ARCANE_BLAST]
 
+    @property
+    def frostfire_bolt(self) -> SpellHandle:
+        """Frostfire Bolt (counts as Fire and Frost)."""
+        return self._handles[SpellId.FROSTFIRE_BOLT]
+
+    @property
+    def blast_wave(self) -> SpellHandle:
+        """Blast Wave (talent)."""
+        return self._handles[SpellId.BLAST_WAVE]
+
+    @property
+    def cone_of_cold(self) -> SpellHandle:
+        """Cone of Cold."""
+        return self._handles[SpellId.CONE_OF_COLD]
+
 
 class TargetView:
     """Read-only view of an enemy."""

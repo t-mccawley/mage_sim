@@ -51,6 +51,7 @@ _IMPLEMENTED: Final = frozenset(
         "Frost Channeling",
         "Ice Lance",
         "Improved Blizzard",
+        "Blast Wave",
     }
 )
 
@@ -104,6 +105,7 @@ class TalentModifiers:
             cost_multiplier={School.FROST: 1.0 - 0.05 * r("Frost Channeling")},
             cast_time_reduction={
                 SpellId.FIREBALL: 0.1 * r("Improved Fireball"),
+                SpellId.FROSTFIRE_BOLT: 0.1 * r("Improved Fireball"),
                 SpellId.FROSTBOLT: 0.1 * r("Improved Frostbolt"),
             },
             cooldown_reduction={

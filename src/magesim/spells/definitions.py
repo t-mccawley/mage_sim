@@ -26,6 +26,9 @@ class SpellId(StrEnum):
     PYROBLAST = "Pyroblast"
     ICE_LANCE = "Ice Lance"
     ARCANE_BLAST = "Arcane Blast"
+    FROSTFIRE_BOLT = "Frostfire Bolt"
+    BLAST_WAVE = "Blast Wave"
+    CONE_OF_COLD = "Cone of Cold"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -69,6 +72,7 @@ class SpellRank:
     channel_ticks: int = 0
     dot: DotData | None = None
     wowhead_id: int | None = None
+    confirmed_in_game_date: str | None = None
 
     def __post_init__(self) -> None:
         if not MIN_LEVEL <= self.level <= MAX_LEVEL:
@@ -89,10 +93,12 @@ class SpellMechanics:
     """Fixed spell behaviour.
 
     `direct_scale` and `dot_scale` multiply the formula coefficient (see coefficients.py).
+    `extra_schools` lists further schools the spell counts as (Frostfire Bolt).
     """
 
     spell_id: SpellId
     school: School
+    extra_schools: tuple[School, ...] = ()
     cast_kind: CastKind
     targeting: Targeting
     direct_scale: float = 1.0
@@ -101,6 +107,11 @@ class SpellMechanics:
     granted_by_talent: str | None = None
     chills: bool = False
     freeze_duration: float = 0.0
+
+    @property
+    def schools(self) -> tuple[School, ...]:
+        """Every school the spell counts as, primary first."""
+        return (self.school, *self.extra_schools)
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,8 +140,13 @@ class SpellDefinition:
 
     @property
     def school(self) -> School:
-        """Magic school."""
+        """Primary magic school."""
         return self.mechanics.school
+
+    @property
+    def schools(self) -> tuple[School, ...]:
+        """Every school the spell counts as."""
+        return self.mechanics.schools
 
     @property
     def cast_kind(self) -> CastKind:

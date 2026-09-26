@@ -3,30 +3,40 @@
 import warnings
 from collections import Counter
 from dataclasses import dataclass
-from typing import Final
 
 import numpy as np
 
 from magesim.engine.results import FloatArray, IterationResult
 from magesim.experiment.candidates import Candidate
-
-LOW_PERCENTILE: Final = 15.0
-HIGH_PERCENTILE: Final = 85.0
+from magesim.model.meta import MetaConfig
 
 
 @dataclass(frozen=True, slots=True)
-class Percentiles:
-    """Median with a 15th-85th percentile band."""
+class ConfidenceInterval:
+    """Median with a bootstrap confidence interval on the median."""
 
-    low: float
     median: float
+    low: float
     high: float
 
     @classmethod
-    def of(cls, values: FloatArray) -> "Percentiles":
-        """Summarize `values`."""
-        low, median, high = np.percentile(values, [LOW_PERCENTILE, 50.0, HIGH_PERCENTILE])
-        return cls(float(low), float(median), float(high))
+    def bootstrap(
+        cls,
+        values: FloatArray,
+        rng: np.random.Generator,
+        *,
+        samples: int,
+        confidence: float,
+    ) -> "ConfidenceInterval":
+        """Percentile bootstrap: resample with replacement, take each resample's median."""
+        resamples = values[rng.integers(0, values.size, size=(samples, values.size))]
+        medians = np.median(resamples, axis=1)
+        tail = (1.0 - confidence) / 2.0
+        low, high = np.quantile(medians, [tail, 1.0 - tail])
+        return cls(float(np.median(values)), float(low), float(high))
+
+    def __str__(self) -> str:
+        return f"{self.median:.1f} ({self.low:.1f} - {self.high:.1f})"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -35,8 +45,8 @@ class CandidateSummary:
 
     candidate: Candidate
     iterations: int
-    total_dps: Percentiles
-    peak_dps: Percentiles
+    total_dps: ConfidenceInterval
+    peak_dps: ConfidenceInterval
     times: FloatArray
     median_dps_series: FloatArray
     damage_share: dict[str, float]
@@ -50,11 +60,21 @@ class CandidateSummary:
 def summarize(
     candidate: Candidate,
     results: list[IterationResult],
-    tick_seconds: float,
+    meta: MetaConfig,
     unimplemented_talents: tuple[str, ...],
 ) -> CandidateSummary:
-    """Reduce iterations to percentiles and a median time series."""
+    """Reduce iterations to median DpS with bootstrap CIs and a median time series."""
     n = len(results)
+    rng = np.random.default_rng([meta.seed, candidate.number])
+
+    def interval(values: list[float]) -> ConfidenceInterval:
+        return ConfidenceInterval.bootstrap(
+            np.array(values),
+            rng,
+            samples=meta.bootstrap_samples,
+            confidence=meta.confidence_level,
+        )
+
     series = np.vstack([r.dps_series for r in results])
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=RuntimeWarning)
@@ -70,9 +90,9 @@ def summarize(
     return CandidateSummary(
         candidate=candidate,
         iterations=n,
-        total_dps=Percentiles.of(np.array([r.total_dps for r in results])),
-        peak_dps=Percentiles.of(np.array([r.peak_dps for r in results])),
-        times=np.arange(1, series.shape[1] + 1, dtype=np.float64) * tick_seconds,
+        total_dps=interval([r.total_dps for r in results]),
+        peak_dps=interval([r.peak_dps for r in results]),
+        times=np.arange(1, series.shape[1] + 1, dtype=np.float64) * meta.tick_seconds,
         median_dps_series=median_series,
         damage_share={k: v / total_damage for k, v in damage.most_common()},
         casts_per_iteration={k: v / n for k, v in casts.most_common()},

@@ -88,21 +88,28 @@ class SpellProfile:
         spell: SpellDefinition,
         delta: LevelDelta,
     ) -> "SpellProfile":
-        """Combine character stats and talents for `spell`."""
-        school = spell.school
-        hit_pct = character.spell_hit.for_school(school) + mods.hit_pct.get(school, 0.0)
-        crit_pct = (
-            character.spell_crit.for_school(school)
-            + mods.crit_pct_school.get(school, 0.0)
-            + mods.crit_pct_spell.get(spell.spell_id, 0.0)
-        )
+        """Combine character stats and talents for `spell`.
+
+        A multi-school spell uses its best school for hit, crit, crit damage, and
+        spell power, and gets every school's damage multiplier.
+        """
+        schools = spell.schools
+        hit_pct = max(character.spell_hit.for_school(s) + mods.hit_pct.get(s, 0.0) for s in schools)
+        crit_pct = max(
+            character.spell_crit.for_school(s) + mods.crit_pct_school.get(s, 0.0) for s in schools
+        ) + mods.crit_pct_spell.get(spell.spell_id, 0.0)
         crit = max(crit_pct / 100.0 - SPELL_CRIT_SUPPRESSION.get(delta, 0.0), 0.0)
+        damage_multiplier = 1.0
+        for s in schools:
+            damage_multiplier *= mods.damage_multiplier.get(s, 1.0)
         return cls(
             hit_chance=hit_chance(delta, hit_pct),
             crit_chance=min(crit, 1.0),
-            crit_multiplier=crit_multiplier(mods.crit_damage_bonus.get(school, 0.0)),
-            spell_power=character.spell_power.for_school(school),
-            damage_multiplier=mods.damage_multiplier.get(school, 1.0),
+            crit_multiplier=crit_multiplier(
+                max(mods.crit_damage_bonus.get(s, 0.0) for s in schools)
+            ),
+            spell_power=max(character.spell_power.for_school(s) for s in schools),
+            damage_multiplier=damage_multiplier,
         )
 
     def roll_outcome(self, rng: random.Random, bonus_crit: float = 0.0) -> HitOutcome:

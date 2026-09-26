@@ -15,11 +15,14 @@ from magesim import (
     SimState,
     SpellChoice,
     SpellId,
+    SpellRank,
     Water,
 )
 from magesim.core.enums import TalentTree
 from magesim.engine.simulator import Simulation
+from magesim.engine.state import UnavailableSpellError
 from magesim.spells.definitions import SpellCatalog
+from magesim.spells.mechanics import build_catalog
 from magesim.talents.build import TalentBuild
 
 NO_TALENTS = TalentBuild(url="", ranks={}, points=dict.fromkeys(TalentTree, 0))
@@ -83,7 +86,7 @@ def test_cooldown_limits_casts(
     result = _sim(rich_mage, dummy, _rotation(_fire_blast_only), catalog).run(random.Random(0))
     rank = catalog[SpellId.FIRE_BLAST].rank_for_level(20)
     assert rank is not None
-    assert result.casts["Fire Blast"] == math.floor(dummy.duration / rank.cooldown) + 1
+    assert result.casts["Fire Blast (Rank 2)"] == math.floor(dummy.duration / rank.cooldown) + 1
 
 
 def test_single_target_ends_on_kill(rich_mage: Character, catalog: SpellCatalog) -> None:
@@ -126,23 +129,54 @@ def test_leveling_drinks_between_pulls(catalog: SpellCatalog) -> None:
     assert not np.isnan(result.dps_series[-1])
 
 
-def test_untalented_spell_is_blocked(
-    rich_mage: Character, dummy: Encounter, catalog: SpellCatalog
+def _pyro_if_ready(s: SimState) -> SpellChoice:
+    return s.spells.pyroblast if s.spells.pyroblast.ready else None
+
+
+def _scorch(s: SimState) -> SpellChoice:
+    return SpellId.SCORCH
+
+
+@pytest.mark.parametrize(
+    ("function", "reason"),
+    [
+        (_pyro_if_ready, "rotation uses Pyroblast, which requires the Pyroblast talent"),
+        (_scorch, "rotation uses Scorch, which has no ranks in configs/spellbook.py"),
+    ],
+)
+def test_unavailable_spell_raises(
+    rich_mage: Character,
+    dummy: Encounter,
+    catalog: SpellCatalog,
+    function: RotationFunction,
+    reason: str,
 ) -> None:
-    def pyro(s: SimState) -> SpellChoice:
-        return s.spells.pyroblast
-
-    result = _sim(rich_mage, dummy, _rotation(pyro), catalog).run(random.Random(0))
-    assert result.total_dps == 0
-    assert result.blocked_seconds["Pyroblast: not known"] == pytest.approx(60, abs=0.2)
+    sim = _sim(rich_mage, dummy, _rotation(function), catalog)
+    with pytest.raises(UnavailableSpellError, match=reason):
+        sim.run(random.Random(0))
 
 
-def test_spell_without_ranks_is_unknown(
-    rich_mage: Character, dummy: Encounter, catalog: SpellCatalog
+FIREBALL_RANKS = [
+    SpellRank(rank=r, level=level, min_damage=10 * r, max_damage=10 * r, cast_time=1.5)
+    for r, level in ((1, 1), (2, 6), (3, 12), (4, 18))
+]
+
+
+@pytest.mark.parametrize(
+    ("level", "overrides", "expected"),
+    [(5, {}, 1), (12, {}, 3), (20, {}, 4), (20, {SpellId.FIREBALL: 2}, 2)],
+)
+def test_casts_max_rank_or_override(
+    dummy: Encounter, level: int, overrides: dict[SpellId, int], expected: int
 ) -> None:
-    def scorch(s: SimState) -> SpellChoice:
-        return s.spells.scorch
-
-    result = _sim(rich_mage, dummy, _rotation(scorch), catalog).run(random.Random(0))
-    assert result.casts == {}
-    assert "Scorch: not known" in result.blocked_seconds
+    character = Character(display_name="c", level=level, intellect=20, spirit=20, mana=1e6)
+    rotation = Rotation(
+        display_name="t",
+        description="",
+        encounter_type=EncounterType.SINGLE_TARGET,
+        rotation_function=_fireball,
+        rank_overrides=overrides,
+    )
+    catalog = build_catalog({SpellId.FIREBALL: FIREBALL_RANKS})
+    result = _sim(character, dummy, rotation, catalog).run(random.Random(0))
+    assert list(result.casts) == [f"Fireball (Rank {expected})"]

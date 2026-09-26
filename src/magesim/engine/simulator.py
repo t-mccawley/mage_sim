@@ -21,11 +21,18 @@ from magesim.core.constants import (
 from magesim.core.enums import CastKind, EncounterType, HitOutcome, LevelDelta, School, Targeting
 from magesim.engine.combat import ResistTable, SpellProfile, level_delta
 from magesim.engine.results import IterationResult, dps_series, peak_dps
-from magesim.engine.state import CasterState, DotState, Enemy, SpellHandle
+from magesim.engine.state import (
+    CasterState,
+    DotState,
+    Enemy,
+    SpellHandle,
+    UnavailableSpellError,
+)
 from magesim.engine.views import SimState, SpellBook
 from magesim.model.character import Character
 from magesim.model.encounter import Encounter
 from magesim.model.rotation import Rotation
+from magesim.spells.availability import resolve_rank
 from magesim.spells.coefficients import RankCoefficients, calculate
 from magesim.spells.definitions import SpellCatalog, SpellDefinition, SpellId, SpellRank
 from magesim.spells.mechanics import (
@@ -46,10 +53,14 @@ WAKE_OF_FIRE_DURATION: float = 30.0
 class RejectReason:
     """Why a rotation's pick could not be cast."""
 
-    UNKNOWN = "not known"
     COOLDOWN = "on cooldown"
     MANA = "not enough mana"
     NO_TARGET = "no target"
+
+
+def _cast_label(handle: SpellHandle) -> str:
+    """Cast counter key, e.g. 'Fireball (Rank 4)'."""
+    return f"{handle.name} (Rank {handle.rank.rank})"
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +69,7 @@ class _SpellSetup:
 
     definition: SpellDefinition
     rank: SpellRank | None
+    unavailable_reason: str | None
     coefficients: RankCoefficients | None
     profile: SpellProfile
     cast_time: float
@@ -95,18 +107,23 @@ class Simulation:
     def _setup(self, definition: SpellDefinition, delta: LevelDelta) -> _SpellSetup:
         mods = self.modifiers
         spell_id = definition.spell_id
-        rank = definition.rank_for_level(self.character.level)
-        if definition.mechanics.granted_by_talent and spell_id not in mods.granted_spells:
-            rank = None
+        resolution = resolve_rank(
+            definition,
+            self.character.level,
+            mods.granted_spells,
+            self.rotation.rank_overrides.get(spell_id),
+        )
+        rank = resolution.rank
         profile = SpellProfile.build(self.character, mods, definition, delta)
         if rank is None:
-            return _SpellSetup(definition, None, None, profile, 0.0, 0.0, 0.0)
+            return _SpellSetup(definition, None, resolution.reason, None, profile, 0.0, 0.0, 0.0)
         cost = rank.mana_cost + rank.base_mana_pct / 100.0 * self.character.base_mana
-        cost *= mods.cost_multiplier.get(definition.school, 1.0)
+        for school in definition.schools:
+            cost *= mods.cost_multiplier.get(school, 1.0)
         cast_time = max(rank.cast_time - mods.cast_time_reduction.get(spell_id, 0.0), 0.0)
         cooldown = max(rank.cooldown - mods.cooldown_reduction.get(spell_id, 0.0), 0.0)
         coefficients = calculate(definition.mechanics, rank)
-        return _SpellSetup(definition, rank, coefficients, profile, cast_time, cooldown, cost)
+        return _SpellSetup(definition, rank, None, coefficients, profile, cast_time, cooldown, cost)
 
     def run(self, rng: random.Random) -> IterationResult:
         """Simulate one iteration."""
@@ -129,6 +146,7 @@ class _Iteration:
                 s.definition,
                 s.rank,
                 self.caster,
+                unavailable_reason=s.unavailable_reason,
                 cast_time=s.cast_time,
                 cooldown=s.cooldown,
                 base_cost=s.base_cost,
@@ -296,6 +314,8 @@ class _Iteration:
         if choice is None:
             return
         handle = self.handles[choice] if isinstance(choice, SpellId) else choice
+        if not handle.known:
+            raise UnavailableSpellError(handle.name, handle.unavailable_reason or "is not known")
         reason = self._reject_reason(handle)
         if reason is not None:
             self.blocked[f"{handle.name}: {reason}"] += self.dt
@@ -317,8 +337,6 @@ class _Iteration:
             self._start_channel(handle, action)
 
     def _reject_reason(self, handle: SpellHandle) -> str | None:
-        if not handle.known:
-            return RejectReason.UNKNOWN
         if handle.on_cooldown:
             return RejectReason.COOLDOWN
         if not handle.affordable:
@@ -340,7 +358,7 @@ class _Iteration:
         assert rank is not None
         self._spend(handle)
         multiplier = self._consume_buffs(handle)
-        self.casts[handle.name] += 1
+        self.casts[_cast_label(handle)] += 1
         self.caster.busy_until = self._at(self.tick + self._ticks(handle.cast_time))
         interval = handle.cast_time / rank.channel_ticks
         for i in range(1, rank.channel_ticks + 1):
@@ -365,7 +383,7 @@ class _Iteration:
     # --- damage -------------------------------------------------------------
 
     def _resolve(self, handle: SpellHandle, multiplier: float) -> None:
-        self.casts[handle.name] += 1
+        self.casts[_cast_label(handle)] += 1
         self._hit_targets(handle, multiplier)
 
     def _hit_targets(self, handle: SpellHandle, multiplier: float) -> None:
@@ -406,7 +424,7 @@ class _Iteration:
         damage *= self.sim.resist_table.roll_multiplier(self.rng)
         if outcome is HitOutcome.CRIT:
             damage *= profile.crit_multiplier
-            if handle.school is School.FIRE and mods.ignite_fraction:
+            if School.FIRE in handle.definition.schools and mods.ignite_fraction:
                 self._apply_ignite(enemy, damage * mods.ignite_fraction)
         self._deal(enemy, damage, handle.name)
         if enemy.alive:
