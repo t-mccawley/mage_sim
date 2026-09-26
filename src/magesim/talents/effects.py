@@ -9,7 +9,7 @@ from typing import Final
 
 from magesim.core.enums import School
 from magesim.spells.definitions import SpellId
-from magesim.spells.spellbook import SPELLBOOK
+from magesim.spells.mechanics import SPELL_MECHANICS
 from magesim.talents.build import TalentBuild
 
 # Talents with no effect on simulated damage.
@@ -91,7 +91,7 @@ class TalentModifiers:
 
         granted = frozenset(
             s.spell_id
-            for s in SPELLBOOK.values()
+            for s in SPELL_MECHANICS.values()
             if s.granted_by_talent is not None and r(s.granted_by_talent) > 0
         )
         known = NO_DAMAGE_EFFECT | _IMPLEMENTED

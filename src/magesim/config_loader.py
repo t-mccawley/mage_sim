@@ -10,6 +10,8 @@ from magesim.model.character import Character
 from magesim.model.encounter import Encounter
 from magesim.model.meta import MetaConfig
 from magesim.model.rotation import Rotation
+from magesim.spells.definitions import SpellCatalog, SpellId, SpellRank
+from magesim.spells.mechanics import build_catalog
 from magesim.talents.build import TalentBuild
 
 CHARACTER_FILE: Final = "character.py"
@@ -17,6 +19,7 @@ ENCOUNTERS_FILE: Final = "encounters.py"
 ROTATIONS_FILE: Final = "rotations.py"
 TALENTS_FILE: Final = "talents.py"
 META_FILE: Final = "meta.py"
+SPELLBOOK_FILE: Final = "spellbook.py"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -27,6 +30,7 @@ class Configs:
     encounters: list[Encounter]
     rotations: list[Rotation]
     talents: list[TalentBuild]
+    catalog: SpellCatalog
     meta: MetaConfig
 
 
@@ -48,6 +52,21 @@ def _list_of[T](module: ModuleType, name: str, kind: type[T]) -> list[T]:
     return value
 
 
+def load_spell_catalog(directory: Path) -> SpellCatalog:
+    """Spell mechanics combined with the ranks in spellbook.py."""
+    module = _load_module(directory / SPELLBOOK_FILE)
+    ranks = getattr(module, "SPELL_RANKS", None)
+    error = TypeError(f"{module.__name__}.SPELL_RANKS must be a dict[SpellId, list[SpellRank]]")
+    if not isinstance(ranks, dict):
+        raise error
+    for spell_id, spell_ranks in ranks.items():
+        if not isinstance(spell_id, SpellId) or not isinstance(spell_ranks, list):
+            raise error
+        if not all(isinstance(r, SpellRank) for r in spell_ranks):
+            raise error
+    return build_catalog(ranks)
+
+
 def load_configs(directory: Path) -> Configs:
     """Import every config file in `directory`."""
     meta = getattr(_load_module(directory / META_FILE), "META", None)
@@ -59,5 +78,6 @@ def load_configs(directory: Path) -> Configs:
         encounters=_list_of(_load_module(directory / ENCOUNTERS_FILE), "ENCOUNTERS", Encounter),
         rotations=_list_of(_load_module(directory / ROTATIONS_FILE), "ROTATIONS", Rotation),
         talents=[TalentBuild.from_url(url) for url in urls],
+        catalog=load_spell_catalog(directory),
         meta=meta,
     )

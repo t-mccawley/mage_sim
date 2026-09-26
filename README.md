@@ -16,6 +16,7 @@ uv sync
 uv run magesim                    # simulate and open the report
 uv run magesim --no-open          # just write results/magesim_<timestamp>.html
 uv run magesim --refresh-talents  # re-download Wowhead talent data first
+uv run magesim spellbook          # write results/spellbook.csv (use --out - for stdout)
 ```
 
 ## Configure (`configs/`)
@@ -27,6 +28,7 @@ uv run magesim --refresh-talents  # re-download Wowhead talent data first
 | `rotations.py` | `ROTATIONS: list[Rotation]` | A function `(SimState) -> spell or None`, called whenever the character can act. |
 | `talents.py` | `TALENT_URLS: list[str]` | Links from https://www.wowhead.com/forever/talent-calc/mage |
 | `meta.py` | `META: MetaConfig` | Seed, iterations, tick size, and peak-DpS warmup. |
+| `spellbook.py` | `SPELL_RANKS: dict[SpellId, list[SpellRank]]` | In-game values per rank: level, mana, damage, cast/channel time, cooldown, DoT. Spells with no ranks are never known. |
 
 A candidate is simulated only when the rotation's `encounter_type` matches the
 encounter's type and the talent build's required level equals the character's level.
@@ -76,8 +78,17 @@ blocked picks, and any talents that aren't modeled.
   - Crit damage is 1.5x. Higher-level enemies suppress crit and add 2% partial
     resists per level.
   - Mage spirit regen is 12.5 + Spirit/4 per 2 s, gated by the five-second rule.
-- **Coefficients**: per-rank wowsims values. Coefficients for Frost Nova,
-  Ice Lance, and Arcane Blast are estimates (marked in `spellbook.py`).
+- **Coefficients**: calculated from `configs/spellbook.py` with the Classic formula
+  (`src/magesim/spells/coefficients.py`):
+  - Direct damage: cast time / 3.5, clamped to 1.5-3.5 s.
+  - Channels: duration / 3.5, split across ticks.
+  - DoTs: duration / 15.
+  - Each is multiplied by a per-spell scale (AoE 1/3, slow/root 0.95, a few
+    fitted to wowsims) and the low-level penalty.
+  - Tests check this reproduces every wowsims/classic rank. Ice Lance and
+    Arcane Blast are new in Forever, so they use the standard formula
+    unadjusted.
+  - Audit everything with `magesim spellbook`.
 - **Spellbook**: trainer spells with ranks up to level 22, plus the
   talent-granted Pyroblast, Ice Lance, and Arcane Blast.
 - **Talents**: every Arcane/Fire/Frost talent in rows 0-2 that affects damage.

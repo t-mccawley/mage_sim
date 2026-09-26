@@ -2,7 +2,52 @@
 
 import pytest
 
-from magesim import Character, Encounter, EncounterType, LevelDelta, SchoolValues
+from magesim import (
+    Character,
+    DotData,
+    Encounter,
+    EncounterType,
+    LevelDelta,
+    SchoolValues,
+    SpellId,
+    SpellRank,
+)
+from magesim.spells.definitions import SpellCatalog
+from magesim.spells.mechanics import build_catalog
+
+
+@pytest.fixture
+def catalog() -> SpellCatalog:
+    """Small spellbook independent of configs/spellbook.py."""
+    return build_catalog(
+        {
+            SpellId.FIREBALL: [
+                SpellRank(
+                    rank=4,
+                    level=18,
+                    min_damage=67,
+                    max_damage=90,
+                    mana_cost=95,
+                    cast_time=3.0,
+                    dot=DotData(damage=12, duration=8, ticks=4),
+                ),
+            ],
+            SpellId.FIRE_BLAST: [
+                SpellRank(rank=2, level=14, min_damage=57, max_damage=69, mana_cost=75, cooldown=8),
+            ],
+            SpellId.PYROBLAST: [
+                SpellRank(
+                    rank=1,
+                    level=20,
+                    min_damage=101,
+                    max_damage=131,
+                    mana_cost=125,
+                    cast_time=6.0,
+                    dot=DotData(damage=44, duration=12, ticks=4),
+                ),
+            ],
+        }
+    )
 
 
 @pytest.fixture

@@ -11,10 +11,11 @@ from magesim.model.consumables import Water
 from magesim.model.encounter import Encounter
 from magesim.model.meta import MetaConfig
 from magesim.model.rotation import Rotation, RotationFunction, SpellChoice
-from magesim.spells.definitions import SpellId
+from magesim.spells.definitions import DotData, SpellId, SpellRank
 
 __all__ = [
     "Character",
+    "DotData",
     "Encounter",
     "EncounterType",
     "LevelDelta",
@@ -28,6 +29,7 @@ __all__ = [
     "SpellChoice",
     "SpellHandle",
     "SpellId",
+    "SpellRank",
     "TargetView",
     "Water",
 ]

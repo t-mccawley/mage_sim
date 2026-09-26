@@ -1,10 +1,12 @@
 """Self-contained HTML report."""
 
 import html
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Final
 
+import numpy as np
 import plotly.graph_objects as go
 
 from magesim.experiment.stats import CandidateSummary, Percentiles
@@ -65,7 +67,7 @@ def _bar_chart(summaries: list[CandidateSummary], title: str, attr: str) -> go.F
             },
             text=[f"{p.median:.1f}" for p in stats],
             textposition="inside",
-            insidetextanchor="end",
+            insidetextanchor="start",
             textfont={"color": "white"},
             customdata=[
                 [p.low, p.high, s.candidate.rotation.display_name]
@@ -88,8 +90,11 @@ def _pct(summary: CandidateSummary, attr: str) -> Percentiles:
     return value
 
 
-def _series_chart(summaries: list[CandidateSummary]) -> go.Figure:
-    """Median cumulative DpS over time; top 8 colored, the rest start hidden."""
+def _series_chart(summaries: list[CandidateSummary], warmup_seconds: float) -> go.Figure:
+    """Median cumulative DpS over time; top 8 colored, the rest start hidden.
+
+    The y-axis fits the data after the warmup, where near-zero time inflates DpS.
+    """
     ranked = sorted(summaries, key=lambda s: s.total_dps.median, reverse=True)
     colored = {id(s): SERIES_COLORS[i] for i, s in enumerate(ranked[: len(SERIES_COLORS)])}
     fig = go.Figure()
@@ -111,61 +116,193 @@ def _series_chart(summaries: list[CandidateSummary]) -> go.Figure:
     _layout(fig, "Median cumulative DpS over time", height=460)
     fig.update_layout(hovermode="x unified", legend={"orientation": "v"})
     fig.update_xaxes(title="Time (s)")
-    fig.update_yaxes(title="DpS", rangemode="tozero")
+    settled = [
+        float(np.nanmax(s.median_dps_series[s.times >= warmup_seconds]))
+        for s in summaries
+        if np.any(~np.isnan(s.median_dps_series[s.times >= warmup_seconds]))
+    ]
+    y_range = [0.0, max(settled) * 1.1] if settled else None
+    fig.update_yaxes(title="DpS", range=y_range)
     return fig
 
 
-def _legend_table(summaries: list[CandidateSummary]) -> str:
-    rows = []
-    for s in sorted(summaries, key=lambda s: s.total_dps.median, reverse=True):
-        c = s.candidate
-        notes = []
-        if s.unimplemented_talents:
-            notes.append("Unmodeled talents: " + ", ".join(s.unimplemented_talents))
-        if s.blocked_seconds_per_iteration:
-            top = ", ".join(
-                f"{k} ({v:.0f} s/run)" for k, v in list(s.blocked_seconds_per_iteration.items())[:3]
-            )
-            notes.append("Blocked picks: " + top)
-        share = ", ".join(f"{k} {v:.0%}" for k, v in list(s.damage_share.items())[:4])
-        rows.append(
-            "<tr>"
-            f"<td class='num'>{c.label}</td>"
-            f"<td class='num'>{s.total_dps.median:.1f}</td>"
-            f"<td>{_esc(c.character.display_name)} (L{c.character.level})</td>"
-            f"<td>{_esc(c.encounter.display_name)}</td>"
-            f"<td><b>{_esc(c.rotation.display_name)}</b><br>"
-            f"<span class='muted'>{_esc(c.rotation.description)}</span></td>"
-            f"<td><a href='{_esc(c.talents.url)}'>{_esc(c.talents.display_name)}</a></td>"
-            f"<td>{_esc(share)}<br><span class='muted'>kills {s.mean_kills:.1f}, "
-            f"drinking {s.mean_drinking_time:.0f} s</span></td>"
-            f"<td class='muted'>{_esc('; '.join(notes))}</td>"
-            "</tr>"
-        )
-    return (
-        "<table><thead><tr><th>#</th><th>Median DpS</th><th>Character</th><th>Encounter</th>"
-        "<th>Rotation</th><th>Talents</th><th>Damage share</th><th>Notes</th></tr></thead>"
-        f"<tbody>{''.join(rows)}</tbody></table>"
+@dataclass(frozen=True, slots=True)
+class _Column:
+    """Legend table column; `numeric` sorts by value, `facet` gets a filter dropdown."""
+
+    title: str
+    numeric: bool = False
+    facet: bool = False
+
+
+_LEGEND_COLUMNS: Final = (
+    _Column("#", numeric=True),
+    _Column("Total DpS", numeric=True),
+    _Column("Total p15-p85"),
+    _Column("Peak DpS", numeric=True),
+    _Column("Encounter", facet=True),
+    _Column("Rotation", facet=True),
+    _Column("Talents", facet=True),
+    _Column("Character", facet=True),
+    _Column("Kills", numeric=True),
+    _Column("Drinking (s)", numeric=True),
+    _Column("Blocked (s)", numeric=True),
+    _Column("Damage share"),
+    _Column("Notes"),
+)
+
+
+def _cell(text: str, sort: float | str | None = None, css: str = "") -> str:
+    """A table cell; `sort` overrides the value used for sorting and filtering."""
+    attrs = f" data-sort='{_esc(str(sort))}'" if sort is not None else ""
+    attrs += f" class='{css}'" if css else ""
+    return f"<td{attrs}>{text}</td>"
+
+
+def _legend_row(s: CandidateSummary) -> str:
+    c = s.candidate
+    notes = []
+    if s.unimplemented_talents:
+        notes.append("Unmodeled talents: " + ", ".join(s.unimplemented_talents))
+    if s.blocked_seconds_per_iteration:
+        top = list(s.blocked_seconds_per_iteration.items())[:3]
+        notes.append("Blocked: " + ", ".join(f"{k} ({v:.0f} s)" for k, v in top))
+    share = ", ".join(f"{k} {v:.0%}" for k, v in list(s.damage_share.items())[:4])
+    total, peak = s.total_dps, s.peak_dps
+    blocked = sum(s.blocked_seconds_per_iteration.values())
+    rotation = (
+        f"<b>{_esc(c.rotation.display_name)}</b><br>"
+        f"<span class='muted'>{_esc(c.rotation.description)}</span>"
     )
+    talents = f"<a href='{_esc(c.talents.url)}'>{_esc(c.talents.display_name)}</a>"
+    cells = (
+        _cell(c.label, c.number, "num"),
+        _cell(f"{total.median:.1f}", total.median, "num"),
+        _cell(f"{total.low:.1f} - {total.high:.1f}", total.median, "num"),
+        _cell(f"{peak.median:.1f}", peak.median, "num"),
+        _cell(_esc(c.encounter.display_name), c.encounter.display_name),
+        _cell(rotation, c.rotation.display_name),
+        _cell(talents, c.talents.display_name),
+        _cell(f"{_esc(c.character.display_name)} (L{c.character.level})", c.character.display_name),
+        _cell(f"{s.mean_kills:.1f}", s.mean_kills, "num"),
+        _cell(f"{s.mean_drinking_time:.0f}", s.mean_drinking_time, "num"),
+        _cell(f"{blocked:.0f}", blocked, "num"),
+        _cell(_esc(share)),
+        _cell(_esc("; ".join(notes)), css="muted"),
+    )
+    return f"<tr>{''.join(cells)}</tr>"
+
+
+def _legend_section(summaries: list[CandidateSummary]) -> str:
+    """Titled, searchable, sortable candidate table (best total DpS first)."""
+    headers = "".join(
+        f"<th data-col='{i}' data-numeric='{int(col.numeric)}' data-facet='{int(col.facet)}' "
+        f"aria-sort='none' tabindex='0'>{_esc(col.title)}</th>"
+        for i, col in enumerate(_LEGEND_COLUMNS)
+    )
+    rows = "".join(
+        _legend_row(s) for s in sorted(summaries, key=lambda s: s.total_dps.median, reverse=True)
+    )
+    return f"""
+<h2>Candidate Legend</h2>
+<div class="controls">
+  <input id="legend-search" type="search" placeholder="Search candidates..."
+         aria-label="Search candidates">
+  <span id="legend-facets"></span>
+  <span id="legend-count" class="muted"></span>
+</div>
+<div class="scroll"><table id="legend"><thead><tr>{headers}</tr></thead>
+<tbody>{rows}</tbody></table></div>"""
 
 
 def _esc(text: str) -> str:
     return html.escape(text, quote=True)
 
 
+# Sorting (click a header), text search, and per-column filter dropdowns.
+_LEGEND_JS: Final = """
+(() => {
+  const table = document.getElementById("legend");
+  const body = table.tBodies[0];
+  const rows = [...body.rows];
+  const headers = [...table.tHead.rows[0].cells];
+  const search = document.getElementById("legend-search");
+  const count = document.getElementById("legend-count");
+  const facets = {};
+  const key = (row, col) => {
+    const cell = row.cells[col];
+    return cell.dataset.sort ?? cell.textContent.trim();
+  };
+  headers.filter(h => h.dataset.facet === "1").forEach(h => {
+    const col = +h.dataset.col;
+    const select = document.createElement("select");
+    select.setAttribute("aria-label", "Filter " + h.textContent);
+    const values = [...new Set(rows.map(r => key(r, col)))].sort();
+    select.add(new Option("All " + h.textContent.toLowerCase(), ""));
+    values.forEach(v => select.add(new Option(v, v)));
+    select.addEventListener("change", apply);
+    facets[col] = select;
+    document.getElementById("legend-facets").append(select);
+  });
+  function apply() {
+    const terms = search.value.toLowerCase().split(/\\s+/).filter(Boolean);
+    let shown = 0;
+    rows.forEach(r => {
+      const text = r.textContent.toLowerCase();
+      const ok = terms.every(t => text.includes(t)) &&
+        Object.entries(facets).every(([col, s]) => !s.value || key(r, +col) === s.value);
+      r.hidden = !ok;
+      shown += ok;
+    });
+    count.textContent = shown + " of " + rows.length + " candidates";
+  }
+  function sortBy(header) {
+    const col = +header.dataset.col;
+    const numeric = header.dataset.numeric === "1";
+    const asc = header.getAttribute("aria-sort") !== "ascending";
+    headers.forEach(h => h.setAttribute("aria-sort", "none"));
+    header.setAttribute("aria-sort", asc ? "ascending" : "descending");
+    const cmp = (a, b) => numeric
+      ? parseFloat(key(a, col)) - parseFloat(key(b, col))
+      : key(a, col).localeCompare(key(b, col), undefined, {numeric: true});
+    rows.sort((a, b) => asc ? cmp(a, b) : cmp(b, a)).forEach(r => body.append(r));
+  }
+  headers.forEach(h => {
+    h.addEventListener("click", () => sortBy(h));
+    h.addEventListener("keydown", e => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); sortBy(h); }
+    });
+  });
+  headers[1].setAttribute("aria-sort", "descending");
+  search.addEventListener("input", apply);
+  apply();
+})();
+"""
+
+
 _CSS: Final = f"""
 body {{ background:{SURFACE}; color:{TEXT_PRIMARY}; font-family:{FONT}; margin:0; }}
 main {{ max-width:1200px; margin:0 auto; padding:24px 16px 48px; }}
 h1 {{ font-size:22px; margin:0 0 4px; }}
+h2 {{ font-size:16px; margin:4px 8px 12px; }}
 .muted {{ color:{TEXT_SECONDARY}; font-size:12px; }}
 .card {{ border:1px solid {GRID}; border-radius:8px; padding:8px; margin:16px 0; }}
-.grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(420px,1fr)); gap:16px; }}
 .scroll {{ overflow-x:auto; }}
+.controls {{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:0 8px 12px; }}
+.controls input, .controls select {{ font:inherit; font-size:13px; padding:6px 8px;
+  border:1px solid {GRID}; border-radius:6px; background:white; color:{TEXT_PRIMARY}; }}
+.controls input {{ min-width:220px; }}
+#legend-facets {{ display:contents; }}
 table {{ border-collapse:collapse; width:100%; font-size:13px; }}
 th, td {{ text-align:left; padding:8px; border-bottom:1px solid {GRID}; vertical-align:top; }}
-th {{ color:{TEXT_SECONDARY}; font-weight:600; }}
+th {{ color:{TEXT_SECONDARY}; font-weight:600; cursor:pointer; user-select:none;
+  white-space:nowrap; position:sticky; top:0; background:{SURFACE}; }}
+th:hover {{ color:{TEXT_PRIMARY}; }}
+th[aria-sort="ascending"]::after {{ content:" \\25B2"; }}
+th[aria-sort="descending"]::after {{ content:" \\25BC"; }}
+tbody tr:hover {{ background:#f3f2ee; }}
 td.num {{ font-variant-numeric:tabular-nums; white-space:nowrap; }}
-a {{ color:{BAR_COLOR}; }}
+a {{ color:{BAR_COLOR}; white-space:nowrap; }}
 """
 
 
@@ -174,7 +311,7 @@ def render_report(summaries: list[CandidateSummary], meta: MetaConfig) -> str:
     figs = [
         _bar_chart(summaries, "Total DpS (median, whiskers p15-p85)", "total_dps"),
         _bar_chart(summaries, "Peak DpS (median, whiskers p15-p85)", "peak_dps"),
-        _series_chart(summaries),
+        _series_chart(summaries, meta.peak_warmup_seconds),
     ]
     divs = [
         f.to_html(
@@ -201,10 +338,11 @@ def render_report(summaries: list[CandidateSummary], meta: MetaConfig) -> str:
 <body><main>
 <h1>MageSim results</h1>
 <div class="muted">{subtitle}</div>
-<div class="grid"><div class="card">{divs[0]}</div><div class="card">{divs[1]}</div></div>
+<div class="card">{divs[0]}</div>
+<div class="card">{divs[1]}</div>
 <div class="card">{divs[2]}</div>
-<div class="card scroll">{_legend_table(summaries)}</div>
-</main></body></html>"""
+<div class="card">{_legend_section(summaries)}</div>
+</main><script>{_LEGEND_JS}</script></body></html>"""
 
 
 def write_report(summaries: list[CandidateSummary], meta: MetaConfig) -> Path:

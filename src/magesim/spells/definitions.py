@@ -1,8 +1,13 @@
-"""Static spell data types."""
+"""Spell data types.
+
+`SpellRank` holds values visible in game (configured in configs/spellbook.py).
+`SpellMechanics` holds fixed behaviour and coefficient scales (spells/mechanics.py).
+"""
 
 from dataclasses import dataclass
 from enum import StrEnum
 
+from magesim.core.constants import MAX_LEVEL, MIN_LEVEL
 from magesim.core.enums import CastKind, School, Targeting
 
 
@@ -25,12 +30,20 @@ class SpellId(StrEnum):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class DotData:
-    """Periodic damage applied on hit."""
+    """Periodic damage applied on hit, e.g. 'an additional 12 Fire damage over 8 sec'."""
 
     damage: float
+    duration: float
     ticks: int
-    tick_interval: float
-    coefficient_per_tick: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.duration <= 0 or self.ticks < 1:
+            raise ValueError("dot needs a positive duration and at least one tick")
+
+    @property
+    def tick_interval(self) -> float:
+        """Seconds between ticks."""
+        return self.duration / self.ticks
 
     @property
     def damage_per_tick(self) -> float:
@@ -40,50 +53,100 @@ class DotData:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SpellRank:
-    """One learnable rank.
+    """One learnable rank, as shown in game.
 
-    For channels, min/max damage and coefficient are per channel tick.
+    For channels, `cast_time` is the channel duration and min/max damage are per tick.
     """
 
     rank: int
     level: int
-    wowhead_id: int
     min_damage: float
     max_damage: float
-    coefficient: float
     mana_cost: float = 0.0
     base_mana_pct: float = 0.0
     cast_time: float = 0.0
-    dot: DotData | None = None
+    cooldown: float = 0.0
     channel_ticks: int = 0
+    dot: DotData | None = None
+    wowhead_id: int | None = None
+
+    def __post_init__(self) -> None:
+        if not MIN_LEVEL <= self.level <= MAX_LEVEL:
+            raise ValueError(f"rank {self.rank}: level {self.level} out of range")
+        if self.min_damage > self.max_damage:
+            raise ValueError(f"rank {self.rank}: min_damage exceeds max_damage")
+        if min(self.mana_cost, self.base_mana_pct, self.cast_time, self.cooldown) < 0:
+            raise ValueError(f"rank {self.rank}: negative cost, cast time, or cooldown")
+
+    @property
+    def average_damage(self) -> float:
+        """Mean of the damage range."""
+        return (self.min_damage + self.max_damage) / 2
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class SpellDefinition:
-    """A spell and all its ranks."""
+class SpellMechanics:
+    """Fixed spell behaviour.
+
+    `direct_scale` and `dot_scale` multiply the formula coefficient (see coefficients.py).
+    """
 
     spell_id: SpellId
     school: School
     cast_kind: CastKind
     targeting: Targeting
-    ranks: tuple[SpellRank, ...]
-    cooldown: float = 0.0
+    direct_scale: float = 1.0
+    dot_scale: float = 1.0
+    scale_note: str = ""
     granted_by_talent: str | None = None
     chills: bool = False
     freeze_duration: float = 0.0
 
+
+@dataclass(frozen=True, slots=True)
+class SpellDefinition:
+    """A spell's mechanics plus its configured ranks (may be empty)."""
+
+    mechanics: SpellMechanics
+    ranks: tuple[SpellRank, ...]
+
     def __post_init__(self) -> None:
-        if not self.ranks:
-            raise ValueError(f"{self.spell_id} has no ranks")
+        numbers = [r.rank for r in self.ranks]
+        if len(numbers) != len(set(numbers)):
+            raise ValueError(f"{self.name}: duplicate rank numbers")
         if self.cast_kind is CastKind.CHANNEL and any(r.channel_ticks < 1 for r in self.ranks):
-            raise ValueError(f"{self.spell_id} channel ranks need channel_ticks")
+            raise ValueError(f"{self.name}: channel ranks need channel_ticks")
+
+    @property
+    def spell_id(self) -> SpellId:
+        """Identifier."""
+        return self.mechanics.spell_id
 
     @property
     def name(self) -> str:
         """Display name."""
-        return self.spell_id.value
+        return self.mechanics.spell_id.value
+
+    @property
+    def school(self) -> School:
+        """Magic school."""
+        return self.mechanics.school
+
+    @property
+    def cast_kind(self) -> CastKind:
+        """Instant, cast, or channel."""
+        return self.mechanics.cast_kind
+
+    @property
+    def targeting(self) -> Targeting:
+        """Single target or AoE."""
+        return self.mechanics.targeting
 
     def rank_for_level(self, level: int) -> SpellRank | None:
         """Highest rank learnable at `level`, if any."""
         known = [r for r in self.ranks if r.level <= level]
         return max(known, key=lambda r: r.rank) if known else None
+
+
+type SpellCatalog = dict[SpellId, SpellDefinition]
+"""Every spell with its configured ranks."""

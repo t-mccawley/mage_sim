@@ -26,12 +26,12 @@ from magesim.engine.views import SimState, SpellBook
 from magesim.model.character import Character
 from magesim.model.encounter import Encounter
 from magesim.model.rotation import Rotation
-from magesim.spells.definitions import SpellDefinition, SpellId, SpellRank
-from magesim.spells.spellbook import (
+from magesim.spells.coefficients import RankCoefficients, calculate
+from magesim.spells.definitions import SpellCatalog, SpellDefinition, SpellId, SpellRank
+from magesim.spells.mechanics import (
     ARCANE_BLAST_DAMAGE_PER_STACK,
     ARCANE_BLAST_DURATION,
     ARCANE_BLAST_MAX_STACKS,
-    SPELLBOOK,
 )
 from magesim.talents.build import TalentBuild
 from magesim.talents.effects import TalentModifiers
@@ -58,6 +58,7 @@ class _SpellSetup:
 
     definition: SpellDefinition
     rank: SpellRank | None
+    coefficients: RankCoefficients | None
     profile: SpellProfile
     cast_time: float
     cooldown: float
@@ -73,6 +74,7 @@ class Simulation:
         encounter: Encounter,
         talents: TalentBuild,
         rotation: Rotation,
+        catalog: SpellCatalog,
         *,
         tick_seconds: float,
         peak_warmup_seconds: float,
@@ -87,27 +89,24 @@ class Simulation:
         delta = level_delta(character.level, self.enemy_level)
         self.resist_table = ResistTable.for_level_gap(self.enemy_level - character.level)
         self.spells = {
-            spell_id: self._setup(definition, delta) for spell_id, definition in SPELLBOOK.items()
+            spell_id: self._setup(definition, delta) for spell_id, definition in catalog.items()
         }
 
     def _setup(self, definition: SpellDefinition, delta: LevelDelta) -> _SpellSetup:
         mods = self.modifiers
+        spell_id = definition.spell_id
         rank = definition.rank_for_level(self.character.level)
-        if definition.granted_by_talent and definition.spell_id not in mods.granted_spells:
+        if definition.mechanics.granted_by_talent and spell_id not in mods.granted_spells:
             rank = None
-        cost = 0.0
-        cast_time = 0.0
-        if rank is not None:
-            cost = rank.mana_cost + rank.base_mana_pct / 100.0 * self.character.base_mana
-            cost *= mods.cost_multiplier.get(definition.school, 1.0)
-            cast_time = max(
-                rank.cast_time - mods.cast_time_reduction.get(definition.spell_id, 0.0), 0.0
-            )
-        cooldown = max(
-            definition.cooldown - mods.cooldown_reduction.get(definition.spell_id, 0.0), 0.0
-        )
         profile = SpellProfile.build(self.character, mods, definition, delta)
-        return _SpellSetup(definition, rank, profile, cast_time, cooldown, cost)
+        if rank is None:
+            return _SpellSetup(definition, None, None, profile, 0.0, 0.0, 0.0)
+        cost = rank.mana_cost + rank.base_mana_pct / 100.0 * self.character.base_mana
+        cost *= mods.cost_multiplier.get(definition.school, 1.0)
+        cast_time = max(rank.cast_time - mods.cast_time_reduction.get(spell_id, 0.0), 0.0)
+        cooldown = max(rank.cooldown - mods.cooldown_reduction.get(spell_id, 0.0), 0.0)
+        coefficients = calculate(definition.mechanics, rank)
+        return _SpellSetup(definition, rank, coefficients, profile, cast_time, cooldown, cost)
 
     def run(self, rng: random.Random) -> IterationResult:
         """Simulate one iteration."""
@@ -386,8 +385,8 @@ class _Iteration:
     def _hit(self, handle: SpellHandle, enemy: Enemy, multiplier: float) -> bool:
         """Roll and apply one spell hit on one enemy; True if it landed."""
         setup = self.sim.spells[handle.spell_id]
-        rank = setup.rank
-        assert rank is not None
+        rank, coefficients = setup.rank, setup.coefficients
+        assert rank is not None and coefficients is not None
         profile = setup.profile
         mods = self.sim.modifiers
         caster = self.caster
@@ -400,7 +399,7 @@ class _Iteration:
             return False
         frozen = caster.time < enemy.frozen_until
         damage = self.rng.uniform(rank.min_damage, rank.max_damage)
-        damage += profile.spell_power * rank.coefficient
+        damage += profile.spell_power * coefficients.direct
         damage *= profile.damage_multiplier * multiplier
         if handle.spell_id is SpellId.ICE_LANCE and frozen:
             damage *= ICE_LANCE_FROZEN_MULTIPLIER
@@ -411,24 +410,27 @@ class _Iteration:
                 self._apply_ignite(enemy, damage * mods.ignite_fraction)
         self._deal(enemy, damage, handle.name)
         if enemy.alive:
-            self._apply_effects(handle, enemy, rank, profile)
+            self._apply_effects(handle, enemy, rank, coefficients, profile)
         return True
 
     def _apply_effects(
-        self, handle: SpellHandle, enemy: Enemy, rank: SpellRank, profile: SpellProfile
+        self,
+        handle: SpellHandle,
+        enemy: Enemy,
+        rank: SpellRank,
+        coefficients: RankCoefficients,
+        profile: SpellProfile,
     ) -> None:
-        definition = handle.definition
+        mechanics = handle.definition.mechanics
         now = self.caster.time
-        if definition.freeze_duration:
-            enemy.frozen_until = max(enemy.frozen_until, now + definition.freeze_duration)
+        if mechanics.freeze_duration:
+            enemy.frozen_until = max(enemy.frozen_until, now + mechanics.freeze_duration)
         mods = self.sim.modifiers
-        chills = definition.chills or (handle.spell_id is SpellId.BLIZZARD and mods.blizzard_chills)
+        chills = mechanics.chills or (handle.spell_id is SpellId.BLIZZARD and mods.blizzard_chills)
         if chills and mods.frostbite_chance and self.rng.random() < mods.frostbite_chance:
             enemy.frozen_until = max(enemy.frozen_until, now + FROSTBITE_FREEZE)
         if rank.dot is not None:
-            tick_damage = (
-                rank.dot.damage_per_tick + profile.spell_power * rank.dot.coefficient_per_tick
-            )
+            tick_damage = rank.dot.damage_per_tick + profile.spell_power * coefficients.dot_per_tick
             self._start_dot(
                 enemy,
                 DotState(

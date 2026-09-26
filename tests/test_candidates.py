@@ -15,8 +15,8 @@ def test_only_compatible_combinations(rich_mage: Character, dummy: Encounter) ->
         for k in EncounterType
     ]
     talents = [
-        TalentBuild.from_url("https://www.wowhead.com/forever/talent-calc/mage/v1-005500001"),
-        TalentBuild.from_url("https://www.wowhead.com/forever/talent-calc/mage/v1-22-02"),
+        TalentBuild.from_url("https://www.wowhead.com/forever/talent-calc/mage/v2-005500001"),
+        TalentBuild.from_url("https://www.wowhead.com/forever/talent-calc/mage/v2-22-02"),
     ]
     candidates = build_candidates([rich_mage], [dummy], rotations, talents)
     assert [(c.rotation.encounter_type, c.talents.required_level) for c in candidates] == [

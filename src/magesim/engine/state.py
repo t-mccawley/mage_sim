@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 
 from magesim.core.enums import CastKind, School
 from magesim.spells.definitions import SpellDefinition, SpellId, SpellRank
-from magesim.spells.spellbook import ARCANE_BLAST_COST_PER_STACK
+from magesim.spells.mechanics import ARCANE_BLAST_COST_PER_STACK
 
 
 @dataclass(slots=True, kw_only=True)
